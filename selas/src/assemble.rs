@@ -268,7 +268,9 @@ fn reloc_type_for(instr: &selinstr::encode::Instruction) -> u8 {
         Instruction::DoLoop { .. } | Instruction::DoUntil { .. } => {
             selelf::elf::R_SHARC_PM_PCREL24 as u8
         }
-        Instruction::UregAbsAccess { .. } => selelf::elf::R_SHARC_PM32 as u8,
+        Instruction::UregAbsAccess { .. } | Instruction::SubWordAbsAccess { .. } => {
+            selelf::elf::R_SHARC_PM32 as u8
+        }
         Instruction::ImmStore { .. } => selelf::elf::R_SHARC_PM32 as u8,
         // Any other instruction landing in the relocation path is a
         // bug in either the parser or the backend: every case we

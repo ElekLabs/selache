@@ -1989,6 +1989,43 @@ fn parse_modify_assign_inner(text: &str, line: u32) -> Result<Instruction> {
 // Memory access
 // ---------------------------------------------------------------------------
 
+/// A direct load or store with a (BW), (BWSE), (SW) or (SWSE) suffix is Type 14d (a data register and DM only), not Type 14.
+fn sub_word_abs(
+    width_mod: Option<&str>,
+    pm: bool,
+    write: bool,
+    ureg: u16,
+    addr: u32,
+    line: u32,
+) -> Result<Option<Instruction>> {
+    let (short, signed) = match width_mod {
+        Some("(BW)") => (false, false),
+        Some("(BWSE)") => (false, true),
+        Some("(SW)") => (true, false),
+        Some("(SWSE)") => (true, true),
+        _ => return Ok(None),
+    };
+    if pm || ureg > 15 {
+        return Err(Error::Parse {
+            line,
+            msg: "(BW)/(SW) on a direct access needs DM and a data register R0-R15".into(),
+        });
+    }
+    if write && signed {
+        return Err(Error::Parse {
+            line,
+            msg: "(BWSE)/(SWSE) is for loads only".into(),
+        });
+    }
+    Ok(Some(Instruction::SubWordAbsAccess {
+        write,
+        short,
+        signed,
+        dreg: ureg,
+        addr,
+    }))
+}
+
 fn parse_mem_access(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     // Extract memory width modifier before stripping
     let (text, width_mod) = extract_width_modifier(text);
@@ -2025,6 +2062,9 @@ fn parse_mem_access(text: &str, line: u32) -> Result<(Instruction, Option<String
             // Single operand: absolute address (Type 14)
             let (addr, sym) = resolve_abs_addr(parts[0], line);
             let ureg = parse_ureg_or_dreg(rhs, line)?;
+            if let Some(instr) = sub_word_abs(width_mod, pm, true, ureg, addr, line)? {
+                return Ok((instr, sym));
+            }
             return Ok((
                 Instruction::UregAbsAccess {
                     pm,
@@ -2050,6 +2090,9 @@ fn parse_mem_access(text: &str, line: u32) -> Result<(Instruction, Option<String
             // Single operand: absolute address (Type 14)
             let (addr, sym) = resolve_abs_addr(parts[0], line);
             let ureg = parse_ureg_or_dreg(lhs, line)?;
+            if let Some(instr) = sub_word_abs(width_mod, pm, false, ureg, addr, line)? {
+                return Ok((instr, sym));
+            }
             return Ok((
                 Instruction::UregAbsAccess {
                     pm,
@@ -5235,6 +5278,36 @@ mod tests {
             assert_eq!(word(src), want, "{src}");
         }
         assert!(parse_instruction("R0 = R0 OR FEXT R11 BY 4:8").is_err());
+    }
+
+    /// A direct DM access with (BW)/(BWSE)/(SW)/(SWSE) is Type 14d (PRM Figure 16-2): byte0 0x1A (0x1B for a store), l = bit 38 for a
+    /// short word, x = bit 36 for sign extension, dreg in bits 35-32. Without a suffix it stays Type 14.
+    #[test]
+    fn direct_sub_word_access_is_type_14d() {
+        for (src, want) in [
+            ("R3 = DM(0x256008)", "100300256008"),
+            ("R3 = DM(0x256008) (SW)", "1a4300256008"),
+            ("R3 = DM(0x256008) (SWSE)", "1a5300256008"),
+            ("R3 = DM(0x256008) (BW)", "1a0300256008"),
+            ("R3 = DM(0x256008) (BWSE)", "1a1300256008"),
+            ("DM(0x256008) = R3 (SW)", "1b4300256008"),
+            ("DM(0x256008) = R3 (BW)", "1b0300256008"),
+        ] {
+            let bytes = encode::encode(&parse_instruction(src).unwrap()).unwrap();
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, want, "{src}");
+            // The disassembler reads the same word back to the same instruction.
+            if want.starts_with("1a") || want.starts_with("1b") {
+                let text = &disasm::disassemble(&bytes, 0, false)[0].text;
+                assert_eq!(
+                    encode::encode(&parse_instruction(text).unwrap()).unwrap(),
+                    bytes,
+                    "{text}"
+                );
+            }
+        }
+        assert!(parse_instruction("DM(0x256008) = R3 (SWSE)").is_err());
+        assert!(parse_instruction("R16 = DM(0x256008) (SW)").is_err());
     }
 
     #[test]

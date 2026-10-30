@@ -692,7 +692,7 @@ fn decode_group0(word: u64) -> String {
         0b10110 => decode_type19(word),
         0b10111 => decode_type20(word),
         0b11000 => decode_type25a(word),
-        0b11011 => decode_type14d(word),
+        0b11010 | 0b11011 => decode_type14d(word),
         _ if (sub >> 2) == 0b100 => decode_type14(word),
         _ => format!("??? 0x{word:012X}"),
     }
@@ -1016,7 +1016,11 @@ fn decode_type6b(word: u64) -> String {
 fn imm_shift_text(op: u8, imm8: u8, len_hi: u32, rn: u32, rx: u32) -> String {
     let signed = |name: &str, or: bool| {
         let imm = imm8 as i8;
-        let or = if or { format!("R{rn} OR ") } else { String::new() };
+        let or = if or {
+            format!("R{rn} OR ")
+        } else {
+            String::new()
+        };
         if imm < 0 {
             format!("R{rn}={or}{name} R{rx} BY -0x{:X}", -(imm as i32))
         } else {
@@ -1027,7 +1031,11 @@ fn imm_shift_text(op: u8, imm8: u8, len_hi: u32, rn: u32, rx: u32) -> String {
     let field = |name: &str, or: bool, se: bool| {
         let pos = imm8 & 0x3F;
         let len = (len_hi << 2) | ((imm8 >> 6) & 3) as u32;
-        let or = if or { format!("R{rn} OR ") } else { String::new() };
+        let or = if or {
+            format!("R{rn} OR ")
+        } else {
+            String::new()
+        };
         let se = if se { " (SE)" } else { "" };
         format!("R{rn}={or}{name} R{rx} BY 0x{pos:X}:0x{len:X}{se}")
     };
@@ -1699,24 +1707,38 @@ fn decode_type19_nw(word: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Type 14d: DM/PM with byte-width access (sub=11011)
+// Type 14d: Dreg<->DM, absolute address, byte or short word or exclusive (PRM Figure 16-2)
 // ---------------------------------------------------------------------------
 
 fn decode_type14d(word: u64) -> String {
-    // Type 14d (sub=11011): DM/PM with byte-width access
-    // bit 42 = g (0=DM, 1=PM), bit 41 = d (0=read, 1=write)
-    let g = bit(word, 42);
-    let d = bit(word, 41);
-    let ureg_field = bits(word, 39, 32);
+    let d = bit(word, 40);
+    let ex = bit(word, 39);
+    let l = bit(word, 38);
+    let w = bit(word, 37);
+    let x = bit(word, 36);
+    let dreg = bits(word, 35, 32);
     let addr32 = bits(word, 31, 0);
 
-    let mem = if g { "PM" } else { "DM" };
-    let ur = ureg_name(ureg_field);
-
+    // PRM opcode table: w=0 is BH/BHSE (byte or short word by l, sign extension by x on loads), w=1 is a normal or long word
+    // (EX / LWEX).
+    let size = match (w, l) {
+        (false, false) => "BW",
+        (false, true) => "SW",
+        (true, false) => "",
+        (true, true) => "LW",
+    };
+    let se = if !d && !w && x { "SE" } else { "" };
+    let ex = if ex { "EX" } else { "" };
+    let suffix = match (size.is_empty(), ex.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => format!(" ({ex})"),
+        (false, true) => format!(" ({size}{se})"),
+        (false, false) => format!(" ({size}{se}, {ex})"),
+    };
     if d {
-        format!("{mem} (0x{addr32:X})={ur} (BW)")
+        format!("DM (0x{addr32:X})=R{dreg}{suffix}")
     } else {
-        format!("{ur}={mem} (0x{addr32:X}) (BW)")
+        format!("R{dreg}=DM (0x{addr32:X}){suffix}")
     }
 }
 

@@ -548,6 +548,19 @@ pub enum Instruction {
         /// 32-bit immediate value to store
         value: u32,
     },
+    /// Type 14d: data register <-> DM with absolute 32-bit address, as a byte or short word (BW, BWSE, SW, SWSE).
+    SubWordAbsAccess {
+        /// true = write (mem = dreg), false = read (dreg = mem)
+        write: bool,
+        /// true = short word (SW), false = byte (BW)
+        short: bool,
+        /// true = sign-extend the loaded value (BWSE, SWSE; loads only)
+        signed: bool,
+        /// Data register R0-R15
+        dreg: u16,
+        /// 32-bit absolute address
+        addr: u32,
+    },
     /// Type 14: ureg <-> DM/PM with absolute 32-bit address.
     UregAbsAccess {
         /// 0=DM, 1=PM
@@ -794,6 +807,13 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
             ureg,
             addr,
         } => encode_type14(pm, write, ureg, addr),
+        Instruction::SubWordAbsAccess {
+            write,
+            short,
+            signed,
+            dreg,
+            addr,
+        } => encode_type14d(write, short, signed, dreg, addr),
     }
 }
 
@@ -1577,6 +1597,39 @@ fn encode_type14(pm: bool, write: bool, ureg: u16, addr: u32) -> Result<u64, Enc
     let d = if write { 1u64 } else { 0 };
     let word = (0b000_100u64 << 42) | (g << 41) | (d << 40) | ((ureg as u64) << 32) | (addr as u64);
     Ok(word)
+}
+
+// ---------------------------------------------------------------------------
+// Type 14d: Dreg<->DM, absolute 32-bit address, byte or short word (PRM Figure 16-2)
+// bits[47:41] = 0001101
+// bit[40]     = d (0=read, 1=write)
+// bit[39]     = ex (exclusive access, 0 here)
+// bit[38]     = l (0=byte, 1=short word)
+// bit[37]     = w (0 for byte and short word)
+// bit[36]     = x (sign-extend, loads only)
+// bits[35:32] = dreg
+// bits[31:0]  = addr32
+// ---------------------------------------------------------------------------
+
+fn encode_type14d(
+    write: bool,
+    short: bool,
+    signed: bool,
+    dreg: u16,
+    addr: u32,
+) -> Result<u64, EncodeError> {
+    check_reg4("14d dreg", dreg)?;
+    if write && signed {
+        return Err(EncodeError {
+            msg: "14d: sign extension is only for loads".into(),
+        });
+    }
+    Ok((0b0001101u64 << 41)
+        | ((write as u64) << 40)
+        | ((short as u64) << 38)
+        | ((signed as u64) << 36)
+        | ((dreg as u64) << 32)
+        | (addr as u64))
 }
 
 // ---------------------------------------------------------------------------
