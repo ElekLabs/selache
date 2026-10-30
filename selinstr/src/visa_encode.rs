@@ -380,7 +380,8 @@ fn try_type2b(cond: u8, compute: &ComputeOp) -> Option<u32> {
 /// or when the XOR trick works.
 ///
 /// Layout: p1[7]=0 (32-bit flag), p1[6]=g, p1[5:1]=cond, p1[0]=i_src[2]
-///         p2[15:14]=i_src[1:0], p2[13:11]=m, p2[10:8]=dest_xor
+///         p2[15:14]=i_src[1:0], p2[13:11]=m, p2[10:8]=dest_xor, p2[7:0]=0x3F (bit 7 zero, bits 6:0 = 0111111)
+/// (PRM Figure 14-20; SHARC Processor PGR Type 7b: "0111111" at bits 22-16 of the frame). Without those bits the word is a 48-bit Type 7a.
 fn try_type7b(pm: bool, i_reg: u8, m_reg: u8, cond: u8) -> Option<u32> {
     // This is MODIFY(Ii, Mm) with the result going back to Ii.
     // i_dest == i_src, so dest_xor = 0.
@@ -391,7 +392,7 @@ fn try_type7b(pm: bool, i_reg: u8, m_reg: u8, cond: u8) -> Option<u32> {
 
     let p1 =
         (0b00000100u16 << 8) | (g << 6) | ((cond as u16 & 0x1F) << 1) | ((i_local as u16 >> 2) & 1);
-    let p2 = ((i_local as u16 & 3) << 14) | ((m_local as u16) << 11) | (dest_xor << 8);
+    let p2 = ((i_local as u16 & 3) << 14) | ((m_local as u16) << 11) | (dest_xor << 8) | 0x3F;
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
@@ -801,6 +802,24 @@ mod tests {
                 assert_eq!(v, 0b1100_0000_0011_0101);
             }
             _ => panic!("expected 16-bit"),
+        }
+    }
+
+    #[test]
+    fn modify_with_m_register_is_type_7b_with_its_fixed_bits() {
+        // MODIFY (I5, M2): PRM Figure 14-20 fixes frame bits 22-16 at 0111111. Without them the word reads as a 48-bit Type 7a.
+        let instr = Instruction::DagModify {
+            pm: false,
+            i_reg: 5,
+            m_reg: 2,
+            cond: 31,
+            compute: None,
+        };
+        let isa = encode_isa(&instr);
+        match visa_encode(&instr, &isa) {
+            // p1 = 0000 0100 0 g=0 cond=11111 is[2]=1 -> 0x043F; p2 = is[1:0]=01, m=010, idis=000, 0x3F -> 0x503F
+            VisaEncoded::W32(v) => assert_eq!(v, 0x043F_503F),
+            _ => panic!("expected 32-bit"),
         }
     }
 
