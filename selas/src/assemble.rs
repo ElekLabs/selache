@@ -430,17 +430,19 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     // the loop body: the hardware DO unit steps the PC in 48-bit
     // instruction units, so any parcel-compressed body instruction
     // desynchronises the loop-end compare and the board hangs. While
-    // `no_compress_label` is set, VISA compression is suppressed and
-    // every body instruction is emitted in full 48-bit ISA form. The
-    // flag is armed by `LCNTR = ..., DO end_lbl UNTIL LCE` whose
-    // end-of-loop target is a symbolic label. It is cleared after the
-    // first instruction encoded at-or-after the end label is written,
-    // so the label's own instruction -- whether on the same line as
-    // the label or on a following line, since a standalone label
-    // names the next instruction's address -- is the last one of the
-    // body and is still forced to 48-bit.
-    let mut no_compress_label: Option<String> = None;
-    let mut end_label_seen: bool = false;
+    // `open_loops` is not empty, VISA compression is suppressed and
+    // every body instruction is emitted in full 48-bit ISA form. A
+    // loop is pushed by each `DO end_lbl UNTIL ...` whose end-of-loop
+    // target is a symbolic label. Loops nest, so there is one entry per
+    // open loop; an inner loop must not hide the outer one. The bool
+    // of an entry is set when its end label is defined. The entry is
+    // removed after the first instruction encoded at-or-after the end
+    // label is written, so the label's own instruction -- whether on
+    // the same line as the label or on a following line, since a
+    // standalone label names the next instruction's address -- is the
+    // last one of the body and is still forced to 48-bit. Loops that
+    // end on the same instruction are removed together.
+    let mut open_loops: Vec<(String, bool)> = Vec::new();
     // Set by `.NOCOMPRESS;`, cleared by `.COMPRESS;`.  While true, every
     // PM-code instruction is emitted in 48-bit ISA form even in a VISA
     // section.  This is required around hardware errata sequences where
@@ -471,7 +473,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
 
         // `.NOCOMPRESS` / `.COMPRESS` toggles affect every subsequent
         // PM-code instruction.  Track them outside `process_directives`
-        // so the flag lives next to the existing `no_compress_label`
+        // so the flag lives next to the existing `open_loops`
         // tracking that drives the encoder's `force_isa` decision.
         match &line.directive {
             Some(Directive::NoCompress) => no_compress_dir = true,
@@ -493,8 +495,10 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                 sec.word_offset()
             };
             sec.symbols.push((label.clone(), word_off));
-            if no_compress_label.as_deref() == Some(label.as_str()) {
-                end_label_seen = true;
+            for (end, seen) in open_loops.iter_mut() {
+                if end == label {
+                    *seen = true;
+                }
             }
         }
 
@@ -536,7 +540,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                 //      future-proof and costs nothing at call sites
                 //      that do not have a reloc.
                 let force_isa =
-                    no_compress_label.is_some() || no_compress_dir || line.label_ref.is_some();
+                    !open_loops.is_empty() || no_compress_dir || line.label_ref.is_some();
                 let encoded = if force_isa {
                     selinstr::visa_encode::VisaEncoded::W48(isa_bytes)
                 } else {
@@ -564,14 +568,14 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
         }
 
         // Clear the "force 48-bit" flag once the first instruction at-
-        // or-after the end-label has been encoded. `end_label_seen` is
+        // or-after the end-label has been encoded. The `seen` flag is
         // set when the label definition is processed (above); the
         // instruction belonging to that label is the last body
         // instruction and has just been written in 48-bit form, so
-        // compression can resume from the next line.
-        if end_label_seen && line.instruction.is_some() {
-            no_compress_label = None;
-            end_label_seen = false;
+        // compression can resume from the next line once no other
+        // loop is open.
+        if line.instruction.is_some() {
+            open_loops.retain(|(_, seen)| !*seen);
         }
 
         // Arm the flag after encoding a `DO end_lbl UNTIL LCE` so the
@@ -584,8 +588,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     | selinstr::encode::Instruction::DoUntil { .. }
             ) {
                 if let Some(lbl) = &line.label_ref {
-                    no_compress_label = Some(lbl.clone());
-                    end_label_seen = false;
+                    open_loops.push((lbl.clone(), false));
                 }
             }
         }
@@ -923,7 +926,7 @@ fn process_directives(line: &ParsedLine, state: &mut DirectiveState<'_>) {
             // section state, label tables, or symbol kind: they only
             // tell the encoder whether to emit subsequent instructions
             // in compressed (VISA) form or in fixed 48-bit ISA form.
-            // The flag is tracked alongside `no_compress_label` in
+            // The flag is tracked alongside `open_loops` in
             // pass 1 of the main encoding loop.
         }
     }
@@ -1809,6 +1812,58 @@ mod tests {
              48-bit; got section size {} instead of 30",
             shdr.sh_size
         );
+    }
+
+    fn seg_pmco_size(src: &str) -> u32 {
+        let data = assemble_source(src, true).expect("assemble");
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        find_section_by_name(&data, &hdr, "seg_pmco")
+            .expect("seg_pmco section not found")
+            .sh_size
+    }
+
+    /// An inner DO loop must not end the 48-bit rule of the outer
+    /// loop: the outer loop's last instruction (a NOP, which VISA
+    /// would compress) is encoded in full form, and code after the
+    /// outer end is compressed again.
+    #[test]
+    fn test_nested_hardware_loop_stays_48_bit_until_outer_end() {
+        let nested = ".SECTION/PM seg_pmco;\n\
+                      LCNTR = 4, DO outer_end UNTIL LCE;\n\
+                      R0 = DM(I1, M6);\n\
+                      LCNTR = 4, DO inner_end UNTIL LCE;\n\
+                      R1 = R0 AND R6;\n\
+                      inner_end: DM(I0, M6) = R1;\n\
+                      R2 = R1 + R0;\n\
+                      outer_end: NOP;\n\
+                      NOP;\n\
+                      .ENDSEG;\n";
+        // 2 DO + 5 body instructions, all 6 bytes, then one NOP
+        // after the loop that compresses to 2 bytes.
+        assert_eq!(seg_pmco_size(nested), 7 * 6 + 2);
+        // Same loops with the end labels on their own lines, and two
+        // loops ending on the same instruction.
+        let own_line = ".SECTION/PM seg_pmco;\n\
+                        LCNTR = 4, DO outer_end UNTIL LCE;\n\
+                        LCNTR = 4, DO outer_end UNTIL LCE;\n\
+                        R1 = R0 AND R6;\n\
+                        outer_end:\n\
+                        NOP;\n\
+                        NOP;\n\
+                        .ENDSEG;\n";
+        assert_eq!(seg_pmco_size(own_line), 4 * 6 + 2);
+    }
+
+    /// A single loop still lets code after the loop compress.
+    #[test]
+    fn test_single_hardware_loop_compresses_after_end() {
+        let src = ".SECTION/PM seg_pmco;\n\
+                   LCNTR = 4, DO loop_end UNTIL LCE;\n\
+                   R1 = R0 AND R6;\n\
+                   loop_end: NOP;\n\
+                   NOP;\n\
+                   .ENDSEG;\n";
+        assert_eq!(seg_pmco_size(src), 3 * 6 + 2);
     }
 
     /// A LoadImm of an external symbol's address has to end up in the
