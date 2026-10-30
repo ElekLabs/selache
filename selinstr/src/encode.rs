@@ -493,9 +493,9 @@ pub enum Instruction {
     },
     /// Type 6b: Immediate shift (LSHIFT/ASHIFT/BSET/BCLR/BTGL/BTST/FEXT/FDEP by imm).
     ImmShift {
-        /// Shift type: 0=LSHIFT, 1=FEXT/FDEP, 2=ASHIFT, 3=BSET/BCLR/BTGL/BTST
+        /// High nibble of the PRM Table 17-9 shiftimm opcode: 0=LSHIFT/ASHIFT/ROT and their OR forms, 1=FEXT/FDEP, 3=BSET/BCLR/BTGL/BTST
         shift_type: u8,
-        /// Sub-operation code
+        /// Low nibble of the shiftimm opcode (0x8 = OR LSHIFT, 0x1 with type 1 = FDEP, ...)
         sub_op: u8,
         /// 8-bit immediate (signed for LSHIFT/ASHIFT; pos|len_lo for FEXT/FDEP)
         imm: u8,
@@ -510,9 +510,9 @@ pub enum Instruction {
     },
     /// Type 6a: Immediate shift (FEXT/FDEP) + DM memory access.
     ImmShiftMem {
-        /// Shift type (1=FEXT/FDEP)
+        /// High nibble of the shiftimm opcode, as in `ImmShift`
         shift_type: u8,
-        /// Sub-operation code (0=FEXT, 1=OR FDEP, 2=OR FEXT, 3=FDEP)
+        /// Low nibble of the shiftimm opcode, as in `ImmShift`
         sub_op: u8,
         /// 8-bit immediate (pos[5:0] | len_lo[1:0]<<6)
         imm: u8,
@@ -767,7 +767,8 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
             dreg,
             cond,
         } => {
-            let op_field = ((shift_type as u64 & 0x7) << 4) | (sub_op as u64 & 3);
+            let op_field = ((shift_type as u64 & 0x7) << 4) | (sub_op as u64 & 0xF);
+            let len_hi = len_hi | shift_sign_extension(op_field as u8, imm);
             let d = if write { 1u64 } else { 0 };
             Ok((0b100u64 << 45)
                 | ((i_reg as u64 & 0xF) << 41)
@@ -1727,6 +1728,16 @@ fn type15_ureg_code(ureg: u16) -> Option<u16> {
 // bits[3:0]   = Rx
 // ---------------------------------------------------------------------------
 
+/// The 4-bit `dataex` field (frame bits 30-27) that carries the sign extension of the 8-bit count of a signed immediate shift: LSHIFT 0x00,
+/// ASHIFT 0x01, OR LSHIFT 0x08, OR ASHIFT 0x09 (PRM Table 17-9 shiftimm opcodes) are 0xF for a negative count and 0 otherwise.
+fn shift_sign_extension(op_field: u8, imm: u8) -> u8 {
+    if matches!(op_field, 0x00 | 0x01 | 0x08 | 0x09) && imm & 0x80 != 0 {
+        0xF
+    } else {
+        0
+    }
+}
+
 fn encode_type6b(
     shift_type: u8,
     sub_op: u8,
@@ -1736,7 +1747,8 @@ fn encode_type6b(
     data_hi: u8,
     cond: u8,
 ) -> Result<u64, EncodeError> {
-    let op_field = ((shift_type as u64 & 0xF) << 4) | (sub_op as u64 & 3);
+    let op_field = ((shift_type as u64 & 0xF) << 4) | (sub_op as u64 & 0xF);
+    let data_hi = data_hi | shift_sign_extension(op_field as u8, imm);
     let word = (0x02u64 << 40)
         | ((cond as u64 & 0x1F) << 33)
         | ((data_hi as u64 & 0x1F) << 27)
@@ -3021,8 +3033,8 @@ mod tests {
     #[test]
     fn roundtrip_imm_ashift() {
         let instr = Instruction::ImmShift {
-            shift_type: 2,
-            sub_op: 0,
+            shift_type: 0,
+            sub_op: 1,
             imm: 8,
             rn: 2,
             rx: 3,

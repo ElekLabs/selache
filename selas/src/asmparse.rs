@@ -892,6 +892,7 @@ fn is_label_token(tok: &str) -> bool {
             | "BW"
             | "SW"
             | "NW"
+            | "SE"
     )
 }
 
@@ -3198,16 +3199,18 @@ fn try_parse_imm_shift(text: &str, line: u32) -> Result<Option<Instruction>> {
         return Ok(None);
     }
 
-    // Check for LSHIFT, ASHIFT, BSET, BCLR, BTGL with BY
-    // Also handle OR LSHIFT / OR ASHIFT immediate forms
+    // Check for LSHIFT, ASHIFT, ROT, BSET, BCLR, BTGL with BY. Also the OR LSHIFT / OR ASHIFT immediate forms.
+    // (shift_type, sub_op) is the PRM Table 17-9 shiftimm opcode split at bit 4.
     let (shift_type, sub_op, keyword) = if text.contains("OR LSHIFT") && text.contains(" BY ") {
-        (0u8, 4u8, "LSHIFT") // sub_op=4 for OR LSHIFT
+        (0u8, 0x8u8, "LSHIFT")
     } else if text.contains("OR ASHIFT") && text.contains(" BY ") {
-        (2u8, 4u8, "ASHIFT") // sub_op=4 for OR ASHIFT
+        (0u8, 0x9u8, "ASHIFT")
     } else if text.contains("LSHIFT") && text.contains(" BY ") {
         (0u8, 0u8, "LSHIFT")
     } else if text.contains("ASHIFT") && text.contains(" BY ") {
-        (2u8, 0u8, "ASHIFT")
+        (0u8, 1u8, "ASHIFT")
+    } else if text.contains("ROT ") && text.contains(" BY ") {
+        (0u8, 2u8, "ROT")
     } else if text.contains("BSET") && text.contains(" BY ") {
         (3u8, 0u8, "BSET")
     } else if text.contains("BCLR") && text.contains(" BY ") {
@@ -3283,14 +3286,14 @@ fn try_parse_imm_fext_fields(text: &str, line: u32) -> Result<Option<ImmFextFiel
     let dst = text[..eq].trim();
     let rhs = text[eq + 1..].trim();
 
-    let (keyword, sub_op) = if rhs.contains("OR FEXT") {
-        ("FEXT", 2u8)
+    let (keyword, or_form) = if rhs.contains("OR FEXT") {
+        ("FEXT", true)
     } else if rhs.contains("OR FDEP") {
-        ("FDEP", 1u8)
+        ("FDEP", true)
     } else if rhs.contains("FEXT") {
-        ("FEXT", 0u8)
+        ("FEXT", false)
     } else if rhs.contains("FDEP") {
-        ("FDEP", 3u8)
+        ("FDEP", false)
     } else {
         return Ok(None);
     };
@@ -3334,8 +3337,22 @@ fn try_parse_imm_fext_fields(text: &str, line: u32) -> Result<Option<ImmFextFiel
         Some(v) => v as u8,
         None => return Ok(None),
     };
-    // (SE) forces sub_op=2 (sign-extending FEXT)
-    let sub_op = if se_suffix { 2 } else { sub_op };
+    // PRM Table 17-9 shiftimm opcodes (low nibble; high nibble is 1): FEXT 0x10, FDEP 0x11, FEXT (SE) 0x12, FDEP (SE) 0x13,
+    // OR FDEP 0x1B, OR FDEP (SE) 0x1D. There is no OR FEXT form.
+    let sub_op = match (keyword, or_form, se_suffix) {
+        ("FEXT", false, false) => 0x0,
+        ("FDEP", false, false) => 0x1,
+        ("FEXT", false, true) => 0x2,
+        ("FDEP", false, true) => 0x3,
+        ("FDEP", true, false) => 0xB,
+        ("FDEP", true, true) => 0xD,
+        _ => {
+            return Err(Error::Parse {
+                line,
+                msg: format!("no immediate form of: {text}"),
+            });
+        }
+    };
 
     let imm = (pos & 0x3F) | ((len & 0x3) << 6);
     let len_hi = (len >> 2) & 0x1F;
@@ -5186,6 +5203,38 @@ mod tests {
             "round-trip mismatch for '{}': orig={:?} reparsed={:?}",
             text, instr, parsed
         );
+    }
+
+    /// Assemble one line and return its bytes as hex (Selache parcel order, as `encode` returns them).
+    fn word(src: &str) -> String {
+        let bytes = encode::encode(&parse_instruction(src).unwrap()).unwrap();
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Immediate shifts carry the PRM Table 17-9 shiftimm opcode (bits 22-16); a negative LSHIFT/ASHIFT count (also the OR forms)
+    /// sets dataex (bits 30-27) to 0xF. The expected words are the stock firmware's shapes.
+    #[test]
+    fn imm_shift_opcodes_follow_prm_table_17_9() {
+        for (src, want) in [
+            ("R0 = LSHIFT R11 BY -16", "023e7800f00b"),
+            ("R0 = LSHIFT R11 BY 16", "023e0000100b"),
+            ("R0 = ASHIFT R11 BY -3", "023e7801fd0b"),
+            ("R0 = ASHIFT R11 BY 3", "023e0001030b"),
+            ("R0 = R0 OR LSHIFT R11 BY 3", "023e0008030b"),
+            ("R0 = R0 OR ASHIFT R11 BY -3", "023e7809fd0b"),
+            ("R0 = ROT R11 BY 3", "023e0002030b"),
+            ("R0 = FEXT R11 BY 4:8", "023e1010040b"),
+            ("R0 = FDEP R11 BY 4:8", "023e1011040b"),
+            ("R0 = FEXT R11 BY 4:8 (SE)", "023e1012040b"),
+            ("R0 = FDEP R11 BY 4:8 (SE)", "023e1013040b"),
+            ("R0 = R0 OR FDEP R11 BY 4:8", "023e101b040b"),
+            ("R0 = R0 OR FDEP R11 BY 4:8 (SE)", "023e101d040b"),
+            ("R0 = BSET R11 BY 5", "023e0030050b"),
+            ("BTST R11 BY 5", "023e0033050b"),
+        ] {
+            assert_eq!(word(src), want, "{src}");
+        }
+        assert!(parse_instruction("R0 = R0 OR FEXT R11 BY 4:8").is_err());
     }
 
     #[test]

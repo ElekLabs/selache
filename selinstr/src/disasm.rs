@@ -976,18 +976,12 @@ fn decode_type6a(word: u64) -> String {
     let d = bit(word, 31);
     let len_field = bits(word, 30, 27);
     let dreg_val = bits(word, 26, 23);
-    let shift_op = bits(word, 23, 16) as u8;
-    let shift_pos = bits(word, 15, 8);
+    let shift_op = bits(word, 22, 16) as u8;
+    let shift_imm = bits(word, 15, 8) as u8;
     let rn = bits(word, 7, 4);
     let rx = bits(word, 3, 0);
 
-    let shift_type = (shift_op >> 4) & 0x7;
-    let shift_len = len_field * 4;
-
-    let shift_str = match shift_type {
-        1 => format!("R{rn}=FEXT R{rx} BY 0x{shift_pos:X}:0x{shift_len:X}"),
-        _ => format!("R{rn}=SHIFT(0x{shift_op:02X}) R{rx} BY 0x{shift_pos:X}:0x{shift_len:X}"),
-    };
+    let shift_str = imm_shift_text(shift_op, shift_imm, len_field, rn, rx);
 
     let mem = "DM";
     let mem_str = if d {
@@ -1013,59 +1007,47 @@ fn decode_type6b(word: u64) -> String {
     let rn = bits(word, 7, 4);
     let rx = bits(word, 3, 0);
     let imm8 = bits(word, 15, 8) as u8;
-    let op_field = bits(word, 23, 16);
-    let shift_type = (op_field >> 4) & 0xF;
-    let sub_op = op_field & 3;
+    let op = bits(word, 23, 16) as u8;
+    let len_hi = bits(word, 31, 27);
+    imm_shift_text(op, imm8, len_hi, rn, rx)
+}
 
-    match shift_type {
-        0 => {
-            // LSHIFT/ASHIFT with immediate
-            let imm = imm8 as i8;
-            if imm < 0 {
-                format!("R{rn}=LSHIFT R{rx} BY -0x{:X}", -(imm as i32))
-            } else {
-                format!("R{rn}=LSHIFT R{rx} BY 0x{imm:X}")
-            }
+/// Text of an immediate shift by its PRM Table 17-9 shiftimm opcode (`op`, 7 bits).
+fn imm_shift_text(op: u8, imm8: u8, len_hi: u32, rn: u32, rx: u32) -> String {
+    let signed = |name: &str, or: bool| {
+        let imm = imm8 as i8;
+        let or = if or { format!("R{rn} OR ") } else { String::new() };
+        if imm < 0 {
+            format!("R{rn}={or}{name} R{rx} BY -0x{:X}", -(imm as i32))
+        } else {
+            format!("R{rn}={or}{name} R{rx} BY 0x{imm:X}")
         }
-        1 => {
-            // FEXT/FDEP with immediate bit position
-            // Position is in bits[13:8] (low 6 bits of imm8)
-            // Length is split across bits[31:27] (high 5) and bits[15:14] (low 2)
-            let pos = imm8 & 0x3F;
-            let len_hi = bits(word, 31, 27);
-            let len_lo = (imm8 >> 6) & 3;
-            let len = (len_hi << 2) | (len_lo as u32);
-            // sub_op encoding:
-            //   0 = FEXT (plain)
-            //   1 = FDEP with OR prefix
-            //   2 = FEXT with OR prefix
-            //   3 = FDEP (plain)
-            match sub_op {
-                0 => format!("R{rn}=FEXT R{rx} BY 0x{pos:X}:0x{len:X}"),
-                1 => format!("R{rn}=R{rn} OR FDEP R{rx} BY 0x{pos:X}:0x{len:X}"),
-                2 => format!("R{rn}=R{rn} OR FEXT R{rx} BY 0x{pos:X}:0x{len:X}"),
-                3 => format!("R{rn}=FDEP R{rx} BY 0x{pos:X}:0x{len:X}"),
-                _ => unreachable!(),
-            }
-        }
-        3 => {
-            // BIT ops: BSET/BCLR/BTGL/BTST
-            match sub_op {
-                0 => format!("R{rn}=BSET R{rx} BY 0x{imm8:X}"),
-                1 => format!("R{rn}=BCLR R{rx} BY 0x{imm8:X}"),
-                2 => format!("R{rn}=BTGL R{rx} BY 0x{imm8:X}"),
-                3 => format!("BTST R{rx} BY 0x{imm8:X}"),
-                _ => unreachable!(),
-            }
-        }
-        _ => {
-            let imm = imm8 as i8;
-            if imm < 0 {
-                format!("R{rn}=ASHIFT R{rx} BY -0x{:X}", -(imm as i32))
-            } else {
-                format!("R{rn}=ASHIFT R{rx} BY 0x{imm:X}")
-            }
-        }
+    };
+    // Position is in imm8[5:0]; length is len_hi (high bits) and imm8[7:6] (low 2 bits).
+    let field = |name: &str, or: bool, se: bool| {
+        let pos = imm8 & 0x3F;
+        let len = (len_hi << 2) | ((imm8 >> 6) & 3) as u32;
+        let or = if or { format!("R{rn} OR ") } else { String::new() };
+        let se = if se { " (SE)" } else { "" };
+        format!("R{rn}={or}{name} R{rx} BY 0x{pos:X}:0x{len:X}{se}")
+    };
+    match op {
+        0x00 => signed("LSHIFT", false),
+        0x01 => signed("ASHIFT", false),
+        0x02 => format!("R{rn}=ROT R{rx} BY 0x{imm8:X}"),
+        0x08 => signed("LSHIFT", true),
+        0x09 => signed("ASHIFT", true),
+        0x10 => field("FEXT", false, false),
+        0x11 => field("FDEP", false, false),
+        0x12 => field("FEXT", false, true),
+        0x13 => field("FDEP", false, true),
+        0x1B => field("FDEP", true, false),
+        0x1D => field("FDEP", true, true),
+        0x30 => format!("R{rn}=BSET R{rx} BY 0x{imm8:X}"),
+        0x31 => format!("R{rn}=BCLR R{rx} BY 0x{imm8:X}"),
+        0x32 => format!("R{rn}=BTGL R{rx} BY 0x{imm8:X}"),
+        0x33 => format!("BTST R{rx} BY 0x{imm8:X}"),
+        _ => format!("R{rn}=SHIFT(0x{op:02X}) R{rx} BY 0x{imm8:X}"),
     }
 }
 
