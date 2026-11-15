@@ -3827,6 +3827,51 @@ mod tests {
     }
 
     #[test]
+    fn register_shifter_se_forms_encode_the_se_opcode() {
+        // SHARC+ PRM Table 17-9 (pp. 17-10, 17-11), shiftop bits 19-12:
+        // FEXT 0x40, FDEP 0x44, FEXT (SE) 0x48, FDEP (SE) 0x4C,
+        // OR FDEP 0x64, OR FDEP (SE) 0x6C. The opcode is the only
+        // difference between the plain and the (SE) word.
+        // The (SE) bit is bit 3 of the opcode: 0x48 = 0x40 | 8,
+        // 0x4C = 0x44 | 8, 0x6C = 0x64 | 8.
+        let vectors: &[(&str, &[u8])] = &[
+            (
+                "r0 = fext r1 by r2 (se)",
+                &[0x01, 0x3e, 0x00, 0x24, 0x80, 0x12],
+            ),
+            (
+                "r0 = fdep r1 by r2 (se)",
+                &[0x01, 0x3e, 0x00, 0x24, 0xc0, 0x12],
+            ),
+            (
+                "r0 = r0 or fdep r1 by r2 (se)",
+                &[0x01, 0x3e, 0x00, 0x26, 0xc0, 0x12],
+            ),
+            (
+                "r0 = r0 or fdep r1 by r2",
+                &[0x01, 0x3e, 0x00, 0x26, 0x40, 0x12],
+            ),
+        ];
+        for (source, expected) in vectors {
+            assert_eq!(visa_instruction_bytes(source), *expected, "{source}");
+        }
+        for src in [
+            "r0 = fext r1 by r2 ( se )",
+            "r0 = fdep r1 by r2 (SE)",
+            "r0=r0 or fdep r1 by r2(se)",
+        ] {
+            assert!(!visa_instruction_bytes(src).is_empty(), "{src}");
+        }
+        for src in [
+            "r0 = fext r1 by r2 (xx)",
+            "r0 = fdep r1 by r2 (se",
+            "r0 = r1 or fdep r1 by r2 (se)",
+        ] {
+            assert!(crate::asmparse::parse_instruction(src).is_err(), "{src}");
+        }
+    }
+
+    #[test]
     fn memory_se_is_rejected_but_compute_se_is_preserved() {
         for memory in ["dm(i0,m6)", "dm(m6,i0)", "pm(i8,m14)", "pm(m14,i8)"] {
             for suffix in ["(se)", "( se )", "(se )", "( se)"] {
@@ -5193,7 +5238,8 @@ mod tests {
                 .collect();
             assert_eq!(hex, vendor, "{case} nwc={nwc}");
         }
-        let delay_slot_branch = ".section/PM/DOUBLE32 br_c05;\n.extern _x;\njump _x (db);\nrts;\nnop;\n";
+        let delay_slot_branch =
+            ".section/PM/DOUBLE32 br_c05;\n.extern _x;\njump _x (db);\nrts;\nnop;\n";
         assert!(assemble_source(delay_slot_branch, true).is_err());
         let nw = AsmOptions {
             nwc: true,

@@ -2631,7 +2631,8 @@ fn parse_do_until(text: &str, line: u32) -> Result<(Instruction, Option<String>)
     if f && term != LCE {
         return Err(Error::Parse {
             line,
-            msg: "a fast loop `(F)` needs the LCE termination condition (reference assembler)".into(),
+            msg: "a fast loop `(F)` needs the LCE termination condition (reference assembler)"
+                .into(),
         });
     }
     Ok((Instruction::DoUntil { addr, term, f }, label_ref))
@@ -5827,6 +5828,19 @@ fn parse_or_shift(rn: u16, rhs: &str, shift_kind: &str, line: u32) -> Result<Com
     }
 }
 
+/// Split a trailing `(SE)` modifier (any spacing) off a register operand.
+fn split_se_suffix(operand: &str) -> (&str, bool) {
+    let operand = operand.trim();
+    if let Some(body) = operand.strip_suffix(')') {
+        if let Some(open) = body.rfind('(') {
+            if body[open + 1..].trim().eq_ignore_ascii_case("SE") {
+                return (body[..open].trim(), true);
+            }
+        }
+    }
+    (operand, false)
+}
+
 fn parse_or_fext_fdep(rn: u16, rhs: &str, kind: &str, line: u32) -> Result<ComputeOp> {
     check_or_operand(rn, rhs, line)?;
     let kw = format!("OR {kind}");
@@ -5837,17 +5851,13 @@ fn parse_or_fext_fdep(rn: u16, rhs: &str, kind: &str, line: u32) -> Result<Compu
         msg: format!("expected 'BY' in OR {kind}"),
     })?;
     let rx = parse_dreg(rx_str.trim(), line)?;
-    let ry_str = ry_part
-        .trim()
-        .strip_suffix("(SE)")
-        .unwrap_or(ry_part.trim())
-        .trim();
+    let (ry_str, has_se) = split_se_suffix(ry_part);
     let ry = parse_dreg(ry_str, line)?;
-    let has_se = ry_part.contains("(SE)");
 
     match (kind, has_se) {
         ("FEXT", true) => Ok(ComputeOp::Shift(ShiftOp::OrFextSe { rn, rx, ry })),
-        ("FDEP", _) => Ok(ComputeOp::Shift(ShiftOp::OrFdep { rn, rx, ry })),
+        ("FDEP", false) => Ok(ComputeOp::Shift(ShiftOp::OrFdep { rn, rx, ry })),
+        ("FDEP", true) => Ok(ComputeOp::Shift(ShiftOp::OrFdepSe { rn, rx, ry })),
         _ => Err(Error::UnknownMnemonic {
             line,
             text: rhs.to_string(),
@@ -5879,10 +5889,13 @@ fn parse_fext_fdep(rn: u16, rest: &str, kind: &str, line: u32) -> Result<Compute
         msg: "expected 'BY' in FEXT/FDEP".into(),
     })?;
     let rx = parse_dreg(rx_str.trim(), line)?;
-    let ry = parse_dreg(ry_str.trim(), line)?;
-    match kind {
-        "FEXT" => Ok(ComputeOp::Shift(ShiftOp::Fext { rn, rx, ry })),
-        "FDEP" => Ok(ComputeOp::Shift(ShiftOp::Fdep { rn, rx, ry })),
+    let (ry_str, has_se) = split_se_suffix(ry_str);
+    let ry = parse_dreg(ry_str, line)?;
+    match (kind, has_se) {
+        ("FEXT", false) => Ok(ComputeOp::Shift(ShiftOp::Fext { rn, rx, ry })),
+        ("FEXT", true) => Ok(ComputeOp::Shift(ShiftOp::OrFextSe { rn, rx, ry })),
+        ("FDEP", false) => Ok(ComputeOp::Shift(ShiftOp::Fdep { rn, rx, ry })),
+        ("FDEP", true) => Ok(ComputeOp::Shift(ShiftOp::FdepSe { rn, rx, ry })),
         _ => Err(Error::UnknownMnemonic {
             line,
             text: rest.to_string(),

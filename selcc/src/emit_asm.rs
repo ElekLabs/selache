@@ -3748,6 +3748,8 @@ fn shift_writes_reg(op: &selinstr::encode::ShiftOp, reg: u16) -> bool {
         | Fext { rn, .. }
         | Fdep { rn, .. }
         | OrFextSe { rn, .. }
+        | FdepSe { rn, .. }
+        | OrFdepSe { rn, .. }
         | OrFdep { rn, .. }
         | Exp { rn, .. }
         | ExpEx { rn, .. }

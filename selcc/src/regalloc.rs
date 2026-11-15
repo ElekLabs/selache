@@ -464,6 +464,8 @@ fn collect_shift_refs(shift: &ShiftOp, refs: &mut VRegRefs) {
         | Fext { rn, rx, ry }
         | Fdep { rn, rx, ry }
         | OrFextSe { rn, rx, ry }
+        | FdepSe { rn, rx, ry }
+        | OrFdepSe { rn, rx, ry }
         | OrFdep { rn, rx, ry } => {
             add_vreg_def(refs, rn);
             add_vreg_use(refs, rx);
@@ -2211,6 +2213,16 @@ impl Allocator {
                 ry: self.get_phys(ry, spill),
             },
             OrFextSe { rn, rx, ry } => OrFextSe {
+                rn: self.get_phys(rn, spill),
+                rx: self.get_phys(rx, spill),
+                ry: self.get_phys(ry, spill),
+            },
+            FdepSe { rn, rx, ry } => FdepSe {
+                rn: self.get_phys(rn, spill),
+                rx: self.get_phys(rx, spill),
+                ry: self.get_phys(ry, spill),
+            },
+            OrFdepSe { rn, rx, ry } => OrFdepSe {
                 rn: self.get_phys(rn, spill),
                 rx: self.get_phys(rx, spill),
                 ry: self.get_phys(ry, spill),
