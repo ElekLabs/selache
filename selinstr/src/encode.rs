@@ -228,8 +228,12 @@ pub enum ShiftOp {
     Fext { rn: u16, rx: u16, ry: u16 },
     /// Rn = FDEP Rx BY Ry
     Fdep { rn: u16, rx: u16, ry: u16 },
-    /// Rn = Rn OR FEXT Rx BY Ry (SE)
+    /// Rn = FEXT Rx BY Ry (SE), shiftop 0x48. (The name is historical.)
     OrFextSe { rn: u16, rx: u16, ry: u16 },
+    /// Rn = FDEP Rx BY Ry (SE), shiftop 0x4C
+    FdepSe { rn: u16, rx: u16, ry: u16 },
+    /// Rn = Rn OR FDEP Rx BY Ry (SE), shiftop 0x6C
+    OrFdepSe { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rn OR FDEP Rx BY Ry
     OrFdep { rn: u16, rx: u16, ry: u16 },
     /// Rn = EXP Rx
@@ -1276,7 +1280,9 @@ fn encode_shift(op: &ShiftOp) -> Result<u32, EncodeError> {
         ShiftOp::Fext { rn, rx, ry } => (0x40, rn, rx, ry),
         ShiftOp::Fdep { rn, rx, ry } => (0x44, rn, rx, ry),
         ShiftOp::OrFextSe { rn, rx, ry } => (0x48, rn, rx, ry),
+        ShiftOp::FdepSe { rn, rx, ry } => (0x4C, rn, rx, ry),
         ShiftOp::OrFdep { rn, rx, ry } => (0x64, rn, rx, ry),
+        ShiftOp::OrFdepSe { rn, rx, ry } => (0x6C, rn, rx, ry),
         ShiftOp::Exp { rn, rx } => (0x80, rn, rx, 0),
         ShiftOp::ExpEx { rn, rx } => (0x84, rn, rx, 0),
         ShiftOp::Leftz { rn, rx } => (0x88, rn, rx, 0),
